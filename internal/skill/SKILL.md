@@ -27,7 +27,11 @@ description: 使用 Limen CLI 查询 JumpServer 授权资产与账号，申请�
 limen connect --asset '<资产ID>' --account '<账号alias>' --permission read-only
 ```
 
-保持本地进程，逐行向 stdin 写入 JSON 请求；一次提交一条，等 `result` 后再提交下一条。输出同样为逐行 JSON，`connected` 表示已连接，并给出只读可写目录的实际路径。
+保持本地进程及 stdin 打开，保存终端工具返回的会话 ID 或进程句柄。后续用该 ID 调用终端工具的输入和输出读取接口，继续操作同一个进程。
+
+输出为逐行 JSON；收到 `connected` 后再提交命令，该事件也会给出只读可写目录的实际路径。每次向 stdin 写入一条 JSON 请求，末尾追加换行；一次提交一条，等对应的 `result` 后再提交下一条。尚未收到 `result` 时继续读取同一进程的输出，不要重复提交命令。收到结果后保持进程及 stdin 打开，下一轮继续使用保存的会话 ID 或进程句柄。
+
+请求中的 `id` 是命令编号，用来对应输出和结果，与终端工具的会话 ID 无关。
 
 ```json
 {"id":"1","op":"exec","command":"uname -a"}
