@@ -46,8 +46,8 @@ command_timeout = 300
 [review]
 # 启用审核时必填，无默认值：
 # llm：仅需 models.llm。
-# jev：仅需 models.jev；判断把握不足时拒绝。
-# hybrid：两者均需；Jev 明确拒绝立即结束，只复核可疑放行。
+# jev：仅需 models.jev。
+# hybrid：两者均需；Jev 判断把握不足时交给 LLM 复核。
 # 未选用的模型可省略，其凭据不会读取。
 mode = "hybrid"
 
