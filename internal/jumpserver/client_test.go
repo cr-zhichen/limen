@@ -9,11 +9,134 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/cr-zhichen/limen/internal/config"
 )
+
+func TestAssetsPreservesMetadataAndResolvesGroupPaths(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("X-JMS-ORG") != rootOrg {
+			t.Errorf("unexpected asset query: %s, org %s", r.Method, r.Header.Get("X-JMS-ORG"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.RequestURI() {
+		case "/api/v1/perms/users/self/assets/?limit=100&offset=0":
+			fmt.Fprint(w, `{"count":2,"results":[{
+				"id":"a","name":"web","address":"10.0.0.1","org_id":"org-a","org_name":"Acme",
+				"nodes":[{"id":"prod","name":"Web"},{"id":"shared","name":"Shared"}],
+				"platform":{"id":33,"name":"Linux"},"category":{"value":"host","label":"Host"},
+				"type":{"value":"linux","label":"Linux"},"is_active":true,
+				"labels":[{"id":"label-1","name":"env","value":"production","color":"red"}],"comment":"primary"
+			}]}`)
+		case "/api/v1/perms/users/self/assets/?limit=100&offset=1":
+			fmt.Fprint(w, `{"count":2,"results":[{
+				"id":"b","name":"db","address":"10.0.0.2","org_id":"org-b","org_name":"Other",
+				"nodes":[{"id":"stage","name":"Web"},{"id":"direct","name":"Direct"}],
+				"platform":null,"category":{"value":"database","label":"Database"},
+				"type":{"value":"mysql","label":"MySQL"},"is_active":false,"labels":[],"comment":""
+			}]}`)
+		case "/api/v1/perms/users/self/nodes/?limit=100&offset=0":
+			fmt.Fprint(w, `{"count":3,"results":[{"id":"stage","name":"Web","full_value":"/Other/Staging/Web"}]}`)
+		case "/api/v1/perms/users/self/nodes/?limit=100&offset=1":
+			fmt.Fprint(w, `{"count":3,"results":[
+				{"id":"shared","name":"Shared","full_value":"/Acme/Shared"},
+				{"id":"prod","name":"Web","full_value":"/Acme/Production/Web"}
+			]}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := New(&config.JumpServer{URL: srv.URL, AccessKeyID: config.Secret{Value: "id"}, AccessKeySecret: config.Secret{Value: "secret"}})
+	assets, err := c.Assets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := json.Marshal(assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `[
+		{
+			"id":"a","name":"web","address":"10.0.0.1","org_id":"org-a","org_name":"Acme",
+			"nodes":[{"id":"prod","name":"Web","full_value":"/Acme/Production/Web"},{"id":"shared","name":"Shared","full_value":"/Acme/Shared"}],
+			"platform":{"id":33,"name":"Linux"},"category":{"value":"host","label":"Host"},
+			"type":{"value":"linux","label":"Linux"},"is_active":true,
+			"labels":[{"id":"label-1","name":"env","value":"production","color":"red"}],"comment":"primary"
+		},
+		{
+			"id":"b","name":"db","address":"10.0.0.2","org_id":"org-b","org_name":"Other",
+			"nodes":[{"id":"stage","name":"Web","full_value":"/Other/Staging/Web"},{"id":"direct","name":"Direct"}],
+			"platform":null,"category":{"value":"database","label":"Database"},
+			"type":{"value":"mysql","label":"MySQL"},"is_active":false,"labels":[],"comment":""
+		}
+	]`
+	var got, want any
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("asset output lost or mismatched metadata: %s", output)
+	}
+}
+
+func TestAssetsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/perms/users/self/assets/" {
+			t.Errorf("unexpected request for empty asset list: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"count":0,"results":[]}`)
+	}))
+	defer srv.Close()
+	c := New(&config.JumpServer{URL: srv.URL, AccessKeyID: config.Secret{Value: "id"}, AccessKeySecret: config.Secret{Value: "secret"}})
+	assets, err := c.Assets(context.Background())
+	if err != nil || assets == nil || len(assets) != 0 {
+		t.Fatalf("expected empty asset array, got %v, %v", assets, err)
+	}
+}
+
+func TestAssetsRejectsIncompleteGroupPages(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"request failed", http.StatusForbidden, ""},
+		{"invalid response", http.StatusOK, `{"count":2,"results":[`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.RequestURI() {
+				case "/api/v1/perms/users/self/assets/?limit=100&offset=0":
+					fmt.Fprint(w, `{"count":1,"results":[{"id":"a","nodes":[{"id":"n","name":"Web"}]}]}`)
+				case "/api/v1/perms/users/self/nodes/?limit=100&offset=0":
+					fmt.Fprint(w, `{"count":2,"results":[{"id":"n","name":"Web","full_value":"/Acme/Web"}]}`)
+				case "/api/v1/perms/users/self/nodes/?limit=100&offset=1":
+					w.WriteHeader(tc.status)
+					fmt.Fprint(w, tc.body)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			c := New(&config.JumpServer{URL: srv.URL, AccessKeyID: config.Secret{Value: "id"}, AccessKeySecret: config.Secret{Value: "secret"}})
+			assets, err := c.Assets(context.Background())
+			if err == nil || assets != nil {
+				t.Fatalf("returned incomplete asset metadata: %v, %v", assets, err)
+			}
+		})
+	}
+}
 
 func TestAssetsPaginationSignatureAndToken(t *testing.T) {
 	pages, posts := 0, 0

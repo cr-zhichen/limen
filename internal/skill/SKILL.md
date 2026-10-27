@@ -15,7 +15,7 @@ description: 使用 Limen CLI 查询 JumpServer 授权资产与账号，申请�
 
 ## 选择服务器
 
-1. `limen assets` 列出全部已授权资产，按返回结果选择资产 ID。
+1. `limen assets` 列出全部已授权资产及分组、平台、标签和备注，按返回结果选择资产 ID。
 2. `limen accounts <资产ID>` 列出账号，连接参数使用返回的 `alias`。
 3. 首次连接运行 `limen host-key` 查看指纹。通过用户或可信管理员记录核实后，用 `limen host-key --trust '<已核实指纹>'` 保存；不要把本次网络查询本身当作核实依据。
 
