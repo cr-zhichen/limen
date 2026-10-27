@@ -1,0 +1,22 @@
+[tools]
+go = "1.27.2"
+actionlint = "1.7.12"
+
+[tasks.deps]
+run = "go mod tidy"
+[tasks.fmt]
+run = "go fmt ./..."
+[tasks.test]
+run = "go test -race -timeout 3m ./..."
+[tasks.vet]
+run = "go vet ./..."
+[tasks.build]
+run = "go run ./scripts/build local"
+[tasks.package]
+run = "go run ./scripts/build package"
+[tasks.release]
+run = "go run ./scripts/build release"
+[tasks."workflows:lint"]
+run = "actionlint"
+[tasks.check]
+depends = ["test", "vet", "build", "workflows:lint"]

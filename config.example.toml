@@ -1,0 +1,80 @@
+# 默认配置路径：本机 ~/.config/limen/config.toml。
+# 凭据统一三选一，所有 access_key_id、access_key_secret、api_key 都适用：
+# { value = "直接填写" }
+# { env = "本机环境变量名" }
+# { command = ["程序", "参数1", "参数2"] }
+# 无默认凭据来源，不自动尝试其他来源。command 在本机执行，不隐式经过 Shell。
+# 标准输出去掉末尾换行后作为凭据；命令失败或值为空则报错，不打印凭据。
+# 1Password 示例：{ command = ["op", "read", "op://Private/JumpServer/secret", "--no-newline"] }
+# Harmonia 示例：{ command = ["harmonia", "exec", "--env", "<环境ID>:API_KEY", "--", "printenv", "API_KEY"] }
+
+[jumpserver]
+# 必填，无默认值；填写 JumpServer HTTP(S) 地址。
+url = "https://jump.example.com"
+# 必填，无默认值；填写 SSH 入口主机。
+ssh_host = "jump.example.com"
+# 默认 2222，取值 1–65535。
+ssh_port = 2222
+# 均必填，支持上述三种来源。
+access_key_id = { env = "JUMPSERVER_ACCESS_KEY_ID" }
+access_key_secret = { env = "JUMPSERVER_ACCESS_KEY_SECRET" }
+
+[permissions]
+# 可选：read-only（只读，专用目录可写）、read-write（读写但禁止毁灭性操作）、
+# unrestricted（跳过审核，仍受远端账号权限限制）。可选一个或多个。
+# 默认 ["read-only"]；连接时只能申请此列表中的权限。
+allowed = ["read-only"]
+# 默认 read-only，必须包含在 allowed 中。
+default = "read-only"
+# 默认 ~/.local/share/limen/tmp；~ 指远端账号主目录，也可填写绝对路径。
+# 只读时仅此目录及子目录可创建、修改、删除文件，不改变当前执行目录。
+# 使用空的专用目录。正常退出清空内容；意外断开保留，下次连接直接使用。
+# 不按时间自动删除，不自动把其他目录的写入重定向到这里。
+read_only_writable_dir = "~/.local/share/limen/tmp"
+
+[session]
+# 所有超时均为非负整数秒；0 取消对应超时，不影响 JumpServer 自身限制。
+# 建立连接超时，默认 15。
+connect_timeout = 15
+# 无正在处理的命令且无新请求时的空闲超时，默认 600。
+# 到期退出并保留可写目录内容。
+idle_timeout = 600
+# 单条远端命令执行超时，默认 300；超时断开连接并保留目录内容。
+command_timeout = 300
+
+[review]
+# 启用审核时必填，无默认值：
+# llm：仅需 models.llm。
+# jev：仅需 models.jev；判断把握不足时拒绝。
+# hybrid：两者均需；Jev 明确拒绝立即结束，只复核可疑放行。
+# 未选用的模型可省略，其凭据不会读取。
+mode = "hybrid"
+
+[models.llm]
+# 使用 LLM 时以下三项必填，无默认值。
+# endpoint 是 OpenAI 兼容 Chat Completions 的完整地址。
+endpoint = "https://api.deepseek.com/chat/completions"
+model = "deepseek-flash"
+api_key = { env = "LLM_API_KEY" }
+# 可选：取所选模型支持的推理强度字符串，无统一枚举。
+# 默认不发送，由服务商决定；仅在模型支持时填写。
+# reasoning_effort = "low"
+
+[models.jev]
+# 使用 Jev 时以下四项必填，无默认值。
+# api_format 可选 typesafe 或 openrouter，不自动切换。
+api_format = "typesafe"
+endpoint = "https://api.typesafe.ai/v1/systemone"
+model = "jev-1.14.0"
+api_key = { env = "TYPESAFE_API_KEY" }
+
+# 若使用 OpenRouter，将上面的四项替换为：
+# api_format = "openrouter"
+# endpoint = "https://openrouter.ai/api/alpha/decisions"
+# model = "typesafe/jev-1.14"
+# api_key = { env = "OPENROUTER_API_KEY" }
+
+# 不使用审核模型：删除 [review] 和所有 [models.*]；将 [permissions] 改为：
+# allowed = ["unrestricted"]
+# default = "unrestricted"
+# 审核失败不会自动切换到无限制模式。

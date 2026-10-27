@@ -1,0 +1,209 @@
+package session
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cr-zhichen/limen/internal/config"
+	"github.com/cr-zhichen/limen/internal/review"
+)
+
+type Remote interface {
+	Command(string, string) (string, error)
+	Execute(context.Context, string, io.Writer, io.Writer) (int, error)
+	CheckScratch(context.Context) error
+	Cleanup(context.Context) error
+}
+type Reviewer interface {
+	Check(context.Context, string, string) (review.Decision, error)
+}
+type Request struct {
+	ID      string `json:"id"`
+	Op      string `json:"op"`
+	Command string `json:"command,omitempty"`
+	Cwd     string `json:"cwd,omitempty"`
+}
+type Event struct {
+	Type        string           `json:"type"`
+	ID          string           `json:"id,omitempty"`
+	Data        string           `json:"data,omitempty"`
+	ExitCode    *int             `json:"exit_code,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	Decision    *review.Decision `json:"review,omitempty"`
+	WritableDir string           `json:"writable_dir,omitempty"`
+}
+type Output struct {
+	mu      sync.Mutex
+	Encoder *json.Encoder
+}
+
+func (o *Output) Send(e Event) error { o.mu.Lock(); defer o.mu.Unlock(); return o.Encoder.Encode(e) }
+
+type stream struct {
+	o        *Output
+	id, kind string
+}
+
+func (s stream) Write(b []byte) (int, error) {
+	if e := s.o.Send(Event{Type: s.kind, ID: s.id, Data: string(b)}); e != nil {
+		return 0, e
+	}
+	return len(b), nil
+}
+
+type Runner struct {
+	Remote   Remote
+	Reviewer Reviewer
+	Mode     string
+	Settings config.Session
+	Output   *Output
+}
+
+// CommandError is a completed request that failed or was denied. The persistent
+// session may accept another request; transport failures terminate the session.
+type CommandError struct{ Message string }
+
+func (e *CommandError) Error() string { return e.Message }
+func (r *Runner) reject(id, message string, decision *review.Decision) error {
+	if err := r.Output.Send(Event{Type: "result", ID: id, Error: message, Decision: decision}); err != nil {
+		return err
+	}
+	return &CommandError{Message: message}
+}
+
+func (r *Runner) Exec(ctx context.Context, req Request) error {
+	source, err := r.Remote.Command(req.Command, req.Cwd)
+	if err != nil {
+		return r.reject(req.ID, err.Error(), nil)
+	}
+	decision, err := r.Reviewer.Check(ctx, r.Mode, source)
+	if err != nil {
+		return r.reject(req.ID, err.Error(), nil)
+	}
+	if !decision.Allowed {
+		return r.reject(req.ID, decision.Reason, &decision)
+	}
+	ctx, cancel := config.WithTimeout(ctx, r.Settings.CommandTimeout)
+	defer cancel()
+	if r.Mode == config.ReadOnly && decision.Facts != nil && decision.Facts.FileScope == "scratch" {
+		if err = r.Remote.CheckScratch(ctx); err != nil {
+			return r.reject(req.ID, err.Error(), nil)
+		}
+	}
+	code, err := r.Remote.Execute(ctx, source, stream{r.Output, req.ID, "stdout"}, stream{r.Output, req.ID, "stderr"})
+	event := Event{Type: "result", ID: req.ID, ExitCode: &code, Decision: &decision}
+	if err != nil {
+		event.Error = err.Error()
+	}
+	if e := r.Output.Send(event); e != nil {
+		return e
+	}
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return &CommandError{Message: fmt.Sprintf("远端命令退出状态为 %d", code)}
+	}
+	return nil
+}
+func (r *Runner) Finish(ctx context.Context) error {
+	cleanup, cancel := config.WithTimeout(ctx, r.Settings.ConnectTimeout)
+	defer cancel()
+	if err := r.Remote.Cleanup(cleanup); err != nil {
+		_ = r.Output.Send(Event{Type: "closed", Error: "可写目录未完成清理，请下次连接后检查"})
+		return err
+	}
+	return r.Output.Send(Event{Type: "closed"})
+}
+func (r *Runner) Serve(ctx context.Context, input io.Reader) error {
+	type line struct {
+		body string
+		err  error
+	}
+	lines := make(chan line)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		s := bufio.NewScanner(input)
+		s.Buffer(make([]byte, 4096), 1<<20)
+		for s.Scan() {
+			select {
+			case lines <- line{body: s.Text()}:
+			case <-done:
+				return
+			}
+		}
+		err := s.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		select {
+		case lines <- line{err: err}:
+		case <-done:
+		}
+	}()
+	for {
+		var timer *time.Timer
+		var timeout <-chan time.Time
+		if r.Settings.IdleTimeout > 0 {
+			timer = time.NewTimer(time.Duration(r.Settings.IdleTimeout) * time.Second)
+			timeout = timer.C
+		}
+		var item line
+		select {
+		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			return ctx.Err()
+		case <-timeout:
+			return errors.New("连接空闲超时，已保留可写目录内容")
+		case item = <-lines:
+			if timer != nil {
+				timer.Stop()
+			}
+		}
+		if item.err != nil {
+			if errors.Is(item.err, io.EOF) {
+				return errors.New("输入已断开，已保留可写目录内容；正常退出请发送 close 请求")
+			}
+			return item.err
+		}
+		var req Request
+		dec := json.NewDecoder(strings.NewReader(item.body))
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&req)
+		var extra any
+		if err == nil && !errors.Is(dec.Decode(&extra), io.EOF) {
+			err = errors.New("每行只能包含一个请求")
+		}
+		if err != nil {
+			if e := r.Output.Send(Event{Type: "result", Error: "请求格式无效，请按 limen skill 中的格式提交"}); e != nil {
+				return e
+			}
+			continue
+		}
+		switch req.Op {
+		case "close":
+			return r.Finish(ctx)
+		case "exec":
+			if err = r.Exec(ctx, req); err != nil {
+				var commandError *CommandError
+				if !errors.As(err, &commandError) {
+					return err
+				}
+			}
+		default:
+			if err = r.Output.Send(Event{Type: "result", ID: req.ID, Error: "op 只能是 exec 或 close"}); err != nil {
+				return err
+			}
+		}
+	}
+}
