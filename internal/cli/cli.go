@@ -154,7 +154,7 @@ func connectCommand(load func() (*config.Config, error), once bool) *cobra.Comma
 
 		alive, disconnect := context.WithCancelCause(ctx)
 		defer disconnect(nil)
-		go func() { _ = conn.SSH.Wait(); disconnect(errors.New("SSH 已断开，可写目录内容已保留")) }()
+		go func() { _ = conn.Wait(); disconnect(errors.New("SSH 已断开，可写目录内容已保留")) }()
 		out := &session.Output{Encoder: json.NewEncoder(cmd.OutOrStdout())}
 		if err = out.Send(session.Event{Type: "connected", WritableDir: conn.Writable}); err != nil {
 			return err

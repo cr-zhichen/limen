@@ -1,6 +1,8 @@
 package files
 
 import (
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,8 +65,37 @@ func Upload(c *sftp.Client, local, remote string, recursive bool) error {
 		return e
 	}
 	defer src.Close()
-	dst, e := c.Create(remote)
+	var mode os.FileMode
+	existing, e := c.Lstat(remote)
+	replacing := e == nil
+	if e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	if replacing {
+		if !existing.Mode().IsRegular() {
+			return errors.New("上传目标不是普通文件，请指定实际文件路径")
+		}
+		mode = existing.Mode().Perm()
+		if _, ok := c.HasExtension("posix-rename@openssh.com"); !ok {
+			return errors.New("服务器不支持完整传输后替换已有文件，请上传到一个新文件名")
+		}
+	}
+	tmp := path.Join(path.Dir(remote), ".limen-upload-"+rand.Text())
+	dst, e := c.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
 	if e != nil {
+		return e
+	}
+	defer c.Remove(tmp)
+	if !replacing {
+		created, err := dst.Stat()
+		if err != nil {
+			dst.Close()
+			return err
+		}
+		mode = created.Mode().Perm()
+	}
+	if e = c.Chmod(tmp, 0600); e != nil {
+		dst.Close()
 		return e
 	}
 	_, copyErr := io.Copy(dst, src)
@@ -75,7 +106,20 @@ func Upload(c *sftp.Client, local, remote string, recursive bool) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return c.Chmod(remote, info.Mode().Perm())
+	if replacing {
+		if stat, ok := existing.Sys().(*sftp.FileStat); ok {
+			if e = c.Chown(tmp, int(stat.UID), int(stat.GID)); e != nil {
+				return e
+			}
+		}
+	}
+	if e = c.Chmod(tmp, mode); e != nil {
+		return e
+	}
+	if replacing {
+		return c.PosixRename(tmp, remote)
+	}
+	return c.Rename(tmp, remote)
 }
 func Download(c *sftp.Client, remote, local string, recursive bool) error {
 	info, e := c.Lstat(remote)
@@ -121,6 +165,15 @@ func Download(c *sftp.Client, remote, local string, recursive bool) error {
 		return e
 	}
 	defer src.Close()
+	mode := info.Mode().Perm() & 0700
+	if existing, err := os.Lstat(local); err == nil {
+		if !existing.Mode().IsRegular() {
+			return errors.New("下载目标不是普通文件，请指定实际文件路径")
+		}
+		mode = existing.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	dst, e := os.CreateTemp(filepath.Dir(local), ".limen-download-*")
 	if e != nil {
 		return e
@@ -131,7 +184,7 @@ func Download(c *sftp.Client, remote, local string, recursive bool) error {
 		dst.Close()
 		return e
 	}
-	if e = dst.Chmod(info.Mode().Perm()); e != nil {
+	if e = dst.Chmod(mode); e != nil {
 		dst.Close()
 		return e
 	}

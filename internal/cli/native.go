@@ -201,7 +201,7 @@ func forwardCommand(load func() (*config.Config, error)) *cobra.Command {
 				failures <- forward.Serve(ctx, b.listener, b.dial, b.spec.Target, b.kind == "socks5", func(e error) { fmt.Fprintln(cmd.ErrOrStderr(), "转发连接失败：", e) })
 			}()
 		}
-		go func() { failures <- conn.SSH.Wait() }()
+		go func() { failures <- conn.Wait() }()
 		select {
 		case <-ctx.Done():
 			e = nil

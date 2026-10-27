@@ -25,6 +25,7 @@ type Client struct {
 	Home, Writable string
 	lease          *ssh.Session
 	leaseInput     io.WriteCloser
+	leaseDone      chan error
 }
 
 func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -233,7 +234,25 @@ func (c *Client) hold(ctx context.Context, source, message string) error {
 	}
 	c.lease = s
 	c.leaseInput = in
+	done := make(chan error, 1)
+	c.leaseDone = done
+	go func() { done <- s.Wait(); close(done) }()
 	return nil
+}
+
+// The asset's session may end while the gateway transport stays connected.
+func (c *Client) Wait() error {
+	if c.leaseDone == nil {
+		return c.SSH.Wait()
+	}
+	transport := make(chan error, 1)
+	go func() { transport <- c.SSH.Wait() }()
+	select {
+	case e := <-transport:
+		return e
+	case e := <-c.leaseDone:
+		return e
+	}
 }
 func (c *Client) Command(command, cwd string) (string, error) {
 	if strings.TrimSpace(command) == "" || strings.ContainsRune(command, 0) {

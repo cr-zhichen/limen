@@ -147,6 +147,24 @@ func TestInterruptLeavesConnectionAvailableForCleanup(t *testing.T) {
 		t.Fatal("normal interruption did not clean files")
 	}
 }
+
+func TestWaitDetectsAssetSessionEndWhileGatewayStaysAlive(t *testing.T) {
+	addr, key := testSSH(t)
+	c := fixtureClient(t, addr, key)
+	if e := c.hold(context.Background(), "printf 'ready\\n'; sleep 0.05", "hold failed"); e != nil {
+		t.Fatal(e)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("asset session exit not detected")
+	}
+	if _, e := c.capture(context.Background(), "printf gateway-alive"); e != nil {
+		t.Fatal("test lost gateway transport", e)
+	}
+}
 func fixtureClient(t *testing.T, addr string, key ssh.PublicKey) *Client {
 	t.Helper()
 	known := filepath.Join(t.TempDir(), "known_hosts")
