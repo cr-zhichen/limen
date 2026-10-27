@@ -96,6 +96,9 @@ func (c *Client) Automatic(ctx context.Context, current string, out io.Writer) {
 	if time.Since(cache.Checked) >= 24*time.Hour {
 		cache.Checked = time.Now()
 		result, err := c.Check(ctx, current)
+		if ctx.Err() != nil {
+			return
+		}
 		if err == nil {
 			cache.Result = result
 		}

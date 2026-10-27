@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,5 +101,42 @@ func TestCancelledSessionPreservesFiles(t *testing.T) {
 	defer writer.Close()
 	if !errors.Is(r.Serve(ctx, input), context.Canceled) || f.cleaned {
 		t.Fatal("cancel cleaned data")
+	}
+}
+
+func TestOutputPreservesUTF8AcrossChunksAndBinaryBytes(t *testing.T) {
+	data := append([]byte("中文日志😀\n"), 0xff, 0xe4)
+	var wire bytes.Buffer
+	s := &stream{o: &Output{Encoder: json.NewEncoder(&wire)}, kind: "stdout"}
+	for _, b := range data {
+		if _, e := s.Write([]byte{b}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e := s.flush(); e != nil {
+		t.Fatal(e)
+	}
+	dec := json.NewDecoder(&wire)
+	var restored []byte
+	for {
+		var event Event
+		e := dec.Decode(&event)
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+		b := []byte(event.Data)
+		if event.Encoding == "base64" {
+			b, e = base64.StdEncoding.DecodeString(event.Data)
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
+		restored = append(restored, b...)
+	}
+	if !bytes.Equal(data, restored) {
+		t.Fatalf("output changed: %x != %x", data, restored)
 	}
 }

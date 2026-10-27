@@ -114,7 +114,7 @@ func automatic(cmd *cobra.Command) func() {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 	done := make(chan struct{})
 	go func() { defer close(done); update.New().Automatic(ctx, version.Version, cmd.ErrOrStderr()) }()
-	return func() { cancel(); <-done }
+	return func() { <-done; cancel() }
 }
 
 func connectCommand(load func() (*config.Config, error), once bool) *cobra.Command {

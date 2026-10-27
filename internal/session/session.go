@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cr-zhichen/limen/internal/config"
 	"github.com/cr-zhichen/limen/internal/review"
@@ -34,6 +36,7 @@ type Event struct {
 	Type        string           `json:"type"`
 	ID          string           `json:"id,omitempty"`
 	Data        string           `json:"data,omitempty"`
+	Encoding    string           `json:"encoding,omitempty"`
 	ExitCode    *int             `json:"exit_code,omitempty"`
 	Error       string           `json:"error,omitempty"`
 	Decision    *review.Decision `json:"review,omitempty"`
@@ -49,13 +52,37 @@ func (o *Output) Send(e Event) error { o.mu.Lock(); defer o.mu.Unlock(); return 
 type stream struct {
 	o        *Output
 	id, kind string
+	pending  []byte
 }
 
-func (s stream) Write(b []byte) (int, error) {
-	if e := s.o.Send(Event{Type: s.kind, ID: s.id, Data: string(b)}); e != nil {
-		return 0, e
+func (s *stream) Write(b []byte) (int, error) {
+	s.pending = append(s.pending, b...)
+	end := 0
+	for end < len(s.pending) && utf8.FullRune(s.pending[end:]) {
+		_, size := utf8.DecodeRune(s.pending[end:])
+		end += size
+	}
+	if end > 0 {
+		if err := s.emit(s.pending[:end]); err != nil {
+			return 0, err
+		}
+		s.pending = append(s.pending[:0], s.pending[end:]...)
 	}
 	return len(b), nil
+}
+func (s *stream) emit(b []byte) error {
+	event := Event{Type: s.kind, ID: s.id, Data: string(b)}
+	if !utf8.Valid(b) {
+		event.Encoding = "base64"
+		event.Data = base64.StdEncoding.EncodeToString(b)
+	}
+	return s.o.Send(event)
+}
+func (s *stream) flush() error {
+	if len(s.pending) == 0 {
+		return nil
+	}
+	return s.emit(s.pending)
 }
 
 type Runner struct {
@@ -79,6 +106,8 @@ func (r *Runner) reject(id, message string, decision *review.Decision) error {
 }
 
 func (r *Runner) Exec(ctx context.Context, req Request) error {
+	ctx, cancel := config.WithTimeout(ctx, r.Settings.CommandTimeout)
+	defer cancel()
 	source, err := r.Remote.Command(req.Command, req.Cwd)
 	if err != nil {
 		return r.reject(req.ID, err.Error(), nil)
@@ -90,14 +119,20 @@ func (r *Runner) Exec(ctx context.Context, req Request) error {
 	if !decision.Allowed {
 		return r.reject(req.ID, decision.Reason, &decision)
 	}
-	ctx, cancel := config.WithTimeout(ctx, r.Settings.CommandTimeout)
-	defer cancel()
 	if r.Mode == config.ReadOnly && decision.Facts != nil && decision.Facts.FileScope == "scratch" {
 		if err = r.Remote.CheckScratch(ctx); err != nil {
 			return r.reject(req.ID, err.Error(), nil)
 		}
 	}
-	code, err := r.Remote.Execute(ctx, source, stream{r.Output, req.ID, "stdout"}, stream{r.Output, req.ID, "stderr"})
+	stdout := &stream{o: r.Output, id: req.ID, kind: "stdout"}
+	stderr := &stream{o: r.Output, id: req.ID, kind: "stderr"}
+	code, err := r.Remote.Execute(ctx, source, stdout, stderr)
+	if flushErr := stdout.flush(); flushErr != nil {
+		return flushErr
+	}
+	if flushErr := stderr.flush(); flushErr != nil {
+		return flushErr
+	}
 	event := Event{Type: "result", ID: req.ID, ExitCode: &code, Decision: &decision}
 	if err != nil {
 		event.Error = err.Error()

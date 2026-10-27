@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -22,6 +23,8 @@ import (
 type Client struct {
 	SSH            *ssh.Client
 	Home, Writable string
+	lease          *ssh.Session
+	leaseInput     io.WriteCloser
 }
 
 func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -94,18 +97,33 @@ func Probe(ctx context.Context, c *config.JumpServer, trust string) (string, err
 	return fp, err
 }
 
-// A cancelled command closes its transport as well: a blocked channel open or
-// a server ignoring SSH signals must not keep a local CLI session alive.
+// A deadline closes the transport; an explicit cancellation interrupts the
+// command channel so a healthy connection can still perform normal cleanup.
 func (c *Client) Run(ctx context.Context, command string, stdout, stderr io.Writer) (int, error) {
-	stop := context.AfterFunc(ctx, func() { _ = c.SSH.Close() })
-	defer stop()
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
+	stopOpen := context.AfterFunc(ctx, func() { _ = c.SSH.Close() })
 	s, err := c.SSH.NewSession()
+	stopOpen()
 	if err != nil {
 		return -1, err
 	}
 	defer s.Close()
+	stop := context.AfterFunc(ctx, func() {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			_ = c.SSH.Close()
+			return
+		}
+		_ = s.Signal(ssh.SIGTERM)
+		_ = s.Close()
+	})
+	defer stop()
 	s.Stdout = stdout
 	s.Stderr = stderr
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
 	err = s.Run(command)
 	if ctx.Err() != nil {
 		return -1, ctx.Err()
@@ -143,21 +161,11 @@ func (c *Client) Prepare(ctx context.Context, dir string) error {
 	if dir == "/" || dir == home {
 		return errors.New("可写目录不能是根目录或账号主目录，请配置专用目录")
 	}
-	// Refuse a populated, unowned directory before adding the cleanup marker.
-	q := Quote(dir)
-	script := `set -eu
-d=` + q + `
-mkdir -p -- "$d"
-d=$(cd -- "$d" && pwd -P)
-[ "$d" != / ] && [ "$d" != "$HOME" ]
-if [ ! -f "$d/.limen-owned" ]; then
- if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  echo '可写目录已有其他内容，请配置一个空的专用目录' >&2; exit 1
- fi
- (umask 077; printf 'limen\n' > "$d/.limen-owned")
-fi
-(cd -- "$d" && pwd -P)`
-	canonical, err := c.capture(ctx, script)
+	canonical, err := c.capture(ctx, `set -eu
+command -v flock >/dev/null || { echo '远端缺少 flock，请安装 util-linux 后连接' >&2; exit 1; }
+mkdir -p -- `+Quote(dir)+`
+cd -- `+Quote(dir)+`
+pwd -P`)
 	if err != nil {
 		return err
 	}
@@ -165,6 +173,58 @@ fi
 		return errors.New("可写目录解析到无效位置，请更换配置")
 	}
 	c.Writable = canonical
+	if err = c.acquire(ctx); err != nil {
+		return err
+	}
+	// The ownership marker stays outside files the user is allowed to delete.
+	script := `set -eu
+d=` + Quote(canonical) + `
+if [ ! -f "$d.limen-owned" ]; then
+ if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  echo '可写目录已有其他内容，请配置一个空的专用目录' >&2; exit 1
+ fi
+ (umask 077; printf 'limen\n' > "$d.limen-owned")
+fi
+`
+	_, err = c.capture(ctx, script)
+	return err
+}
+
+func (c *Client) acquire(ctx context.Context) error {
+	stop := context.AfterFunc(ctx, func() { _ = c.SSH.Close() })
+	defer stop()
+	s, err := c.SSH.NewSession()
+	if err != nil {
+		return err
+	}
+	in, err := s.StdinPipe()
+	if err != nil {
+		s.Close()
+		return err
+	}
+	out, err := s.StdoutPipe()
+	if err != nil {
+		s.Close()
+		return err
+	}
+	// flock is held by the remote shell until stdin/SSH closes; no expiration or
+	// persistent stale PID lock prevents recovering files after an interruption.
+	source := `umask 077
+exec 9>` + Quote(c.Writable+".limen-lock") + `
+flock -n 9 || { printf 'busy\n'; exit 75; }
+printf 'ready\n'
+cat >/dev/null`
+	if err = s.Start(source); err != nil {
+		s.Close()
+		return err
+	}
+	ready, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || ready != "ready\n" {
+		s.Close()
+		return errors.New("可写目录正在被其他 Limen 连接使用，请关闭该连接后重试")
+	}
+	c.lease = s
+	c.leaseInput = in
 	return nil
 }
 func (c *Client) Command(command, cwd string) (string, error) {
@@ -191,7 +251,7 @@ func (c *Client) CheckScratch(ctx context.Context) error {
 	source := `set -eu
 d=` + Quote(c.Writable) + `
 [ "$(cd -- "$d" && pwd -P)" = "$d" ]
-[ -f "$d/.limen-owned" ]
+[ -f "$d.limen-owned" ]
 [ -z "$(find "$d" -type l -print -quit)" ]
 [ -z "$(find "$d" -type f -links +1 -print -quit)" ]`
 	_, err := c.capture(ctx, source)
@@ -207,9 +267,17 @@ func (c *Client) Cleanup(ctx context.Context) error {
 	source := `set -eu
 d=` + Quote(c.Writable) + `
 [ "$(cd -- "$d" && pwd -P)" = "$d" ]
-[ -f "$d/.limen-owned" ]
-find "$d" -mindepth 1 -maxdepth 1 ! -name .limen-owned -exec rm -rf -- {} +`
+[ -f "$d.limen-owned" ]
+find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`
 	_, err := c.capture(ctx, source)
 	return err
 }
-func (c *Client) Close() error { return c.SSH.Close() }
+func (c *Client) Close() error {
+	if c.leaseInput != nil {
+		_ = c.leaseInput.Close()
+	}
+	if c.lease != nil {
+		_ = c.lease.Close()
+	}
+	return c.SSH.Close()
+}

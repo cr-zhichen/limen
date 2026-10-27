@@ -86,3 +86,14 @@ func TestPrereleaseNotInstalled(t *testing.T) {
 		t.Fatal("prerelease accepted")
 	}
 }
+
+func TestCancelledAutomaticCheckDoesNotConsumeDailyCheck(t *testing.T) {
+	c := New()
+	c.Cache = filepath.Join(t.TempDir(), "update.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.Automatic(ctx, "0.1.0", &bytes.Buffer{})
+	if _, e := os.Stat(c.Cache); !os.IsNotExist(e) {
+		t.Fatal("cancelled request cached as checked")
+	}
+}

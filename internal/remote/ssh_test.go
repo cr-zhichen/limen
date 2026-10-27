@@ -26,6 +26,9 @@ func testSSH(t *testing.T) (string, ssh.PublicKey) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture runs a POSIX remote shell")
 	}
+	if _, e := exec.LookPath("flock"); e != nil {
+		t.Skip("Linux SSH fixture requires flock; exercised by Linux CI")
+	}
 	_, private, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(private)
 	server := &ssh.ServerConfig{NoClientAuth: true}
@@ -81,13 +84,36 @@ func testSSH(t *testing.T) (string, ssh.PublicKey) {
 							command := exec.CommandContext(ctx, "bash", "-c", payload.Command)
 							command.Stdout = ch
 							command.Stderr = ch.Stderr()
-							err := command.Run()
-							code := uint32(0)
-							if err != nil {
-								code = 1
+							input, _ := command.StdinPipe()
+							go func() { _, _ = io.Copy(input, ch); _ = input.Close() }()
+							if e := command.Start(); e != nil {
+								return
 							}
-							ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{code}))
-							return
+							finished := make(chan error, 1)
+							go func() { finished <- command.Wait() }()
+							for {
+								select {
+								case err := <-finished:
+									code := uint32(0)
+									if err != nil {
+										code = 1
+									}
+									ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{code}))
+									return
+								case signal, ok := <-requests:
+									if !ok {
+										command.Process.Kill()
+										<-finished
+										return
+									}
+									if signal.Type == "signal" {
+										command.Process.Kill()
+										signal.Reply(true, nil)
+									} else {
+										signal.Reply(false, nil)
+									}
+								}
+							}
 						}
 					}()
 				}
@@ -95,6 +121,31 @@ func testSSH(t *testing.T) (string, ssh.PublicKey) {
 		}
 	}()
 	return listener.Addr().String(), signer.PublicKey()
+}
+
+type cancelOnOutput struct{ cancel context.CancelFunc }
+
+func (w cancelOnOutput) Write(b []byte) (int, error) { w.cancel(); return len(b), nil }
+func TestInterruptLeavesConnectionAvailableForCleanup(t *testing.T) {
+	addr, key := testSSH(t)
+	c := fixtureClient(t, addr, key)
+	dir := filepath.Join(t.TempDir(), "scratch")
+	if e := c.Prepare(context.Background(), dir); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(filepath.Join(dir, "result"), []byte("data"), 0600)
+	source, _ := c.Command("printf started; exec sleep 30", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, e := c.Execute(ctx, source, cancelOnOutput{cancel}, io.Discard); !errors.Is(e, context.Canceled) {
+		t.Fatal("interrupt did not stop command", e)
+	}
+	if e := c.Cleanup(context.Background()); e != nil {
+		t.Fatal("connection unavailable for normal cleanup", e)
+	}
+	if _, e := os.Stat(filepath.Join(dir, "result")); !os.IsNotExist(e) {
+		t.Fatal("normal interruption did not clean files")
+	}
 }
 func fixtureClient(t *testing.T, addr string, key ssh.PublicKey) *Client {
 	t.Helper()
@@ -125,6 +176,11 @@ func TestPersistentSSHRetainsOnDisconnectAndCleansOnClose(t *testing.T) {
 	if code, e := c.Execute(ctx, source, io.Discard, io.Discard); e != nil || code != 0 {
 		t.Fatal(code, e)
 	}
+	// Clearing every writable file must not remove Limen's ownership metadata.
+	source, _ = c.Command(`find "$LIMEN_WRITABLE_DIR" -mindepth 1 -delete; printf '%s' data > "$LIMEN_WRITABLE_DIR/result"`, "")
+	if code, e := c.Execute(ctx, source, io.Discard, io.Discard); e != nil || code != 0 {
+		t.Fatal(code, e)
+	}
 	c.Close()
 	if b, e := os.ReadFile(filepath.Join(dir, "result")); e != nil || string(b) != "data" {
 		t.Fatal("disconnect removed result", e)
@@ -143,6 +199,28 @@ func TestPersistentSSHRetainsOnDisconnectAndCleansOnClose(t *testing.T) {
 	}
 	if _, e = os.Stat(filepath.Join(dir, "result")); !os.IsNotExist(e) {
 		t.Fatal("normal close did not clean")
+	}
+}
+
+func TestConcurrentConnectionsCannotCleanEachOthersFiles(t *testing.T) {
+	addr, key := testSSH(t)
+	first := fixtureClient(t, addr, key)
+	dir := filepath.Join(t.TempDir(), "scratch")
+	ctx := context.Background()
+	if e := first.Prepare(ctx, dir); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(filepath.Join(dir, "data"), []byte("keep"), 0600)
+	second := fixtureClient(t, addr, key)
+	if e := second.Prepare(ctx, dir); e == nil {
+		t.Fatal("second session shared active writable directory")
+	}
+	second.Close()
+	if b, _ := os.ReadFile(filepath.Join(dir, "data")); string(b) != "keep" {
+		t.Fatal("second connection deleted active data")
+	}
+	if e := first.Cleanup(ctx); e != nil {
+		t.Fatal(e)
 	}
 }
 func TestScratchLinksAndExistingData(t *testing.T) {

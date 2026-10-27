@@ -1,6 +1,6 @@
 # Limen
 
-Limen 是供 AI 助手和终端用户通过 JumpServer 执行远端命令的 CLI。它支持只读、读写和无限制三档权限，可以在一个持续 SSH 连接中逐条审核并执行命令。需要已有的 JumpServer Access Key；只读和读写模式还需要配置 Jev 或普通 LLM。
+Limen 是供 AI 助手和终端用户通过 JumpServer 执行远端命令的 CLI。它支持只读、读写和无限制三档权限，可以在一个持续 SSH 连接中逐条审核并执行命令。需要已有的 JumpServer Access Key，以及提供 Bash 和 flock（util-linux）的 Linux 服务器；只读和读写模式还需要配置 Jev 或普通 LLM。
 
 ## 快速安装
 
