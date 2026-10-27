@@ -23,7 +23,7 @@ irm https://github.com/cr-zhichen/limen/releases/latest/download/install.ps1 | i
 将下面的提示词交给你的 AI 助手：
 
 ```text
-请按 https://github.com/cr-zhichen/limen 的 README 为当前电脑安装 Limen，验证 limen version，并把 Limen skill 安装到你使用的 skills 目录。随后运行 limen skill 读取说明，检查已有配置；缺少配置时，询问我 JumpServer 地址、SSH 入口、Access Key 来源、允许的权限和审核模型，按我的选择完成配置。密钥可以引用环境变量、Harmonia 或 1Password，不要在对话中展示密钥，不覆盖已有配置，也不要自行启用无限制权限。完成后查询可访问的资产，不执行服务器修改命令。
+请按 https://github.com/cr-zhichen/limen 的 README 为当前电脑安装 Limen，验证 limen version，并把 Limen skill 安装到你使用的 skills 目录。随后运行 limen skill 读取说明，检查已有配置；缺少配置时，按 skill 的「配置与授权」流程询问我并完成配置。密钥可以引用环境变量、Harmonia 或 1Password，不要在对话中展示密钥，不覆盖已有配置，也不要自行启用无限制权限。完成后查询可访问的资产，不执行服务器修改命令。
 ```
 
 ## 配置
