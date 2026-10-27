@@ -191,6 +191,19 @@ fi
 }
 
 func (c *Client) acquire(ctx context.Context) error {
+	return c.hold(ctx, `umask 077
+exec 9>`+Quote(c.Writable+".limen-lock")+`
+flock -n 9 || { printf 'busy\n'; exit 75; }
+printf 'ready\n'
+cat >/dev/null`, "可写目录正在被其他 Limen 连接使用，请关闭该连接后重试")
+}
+
+// JumpServer initializes forwarding state from a live SSH session. No user
+// command or filesystem change is involved in keeping that channel open.
+func (c *Client) KeepOpen(ctx context.Context) error {
+	return c.hold(ctx, "printf 'ready\\n'; cat >/dev/null", "远端未能建立转发会话，请检查 JumpServer 的转发权限")
+}
+func (c *Client) hold(ctx context.Context, source, message string) error {
 	stop := context.AfterFunc(ctx, func() { _ = c.SSH.Close() })
 	defer stop()
 	s, err := c.SSH.NewSession()
@@ -209,11 +222,6 @@ func (c *Client) acquire(ctx context.Context) error {
 	}
 	// flock is held by the remote shell until stdin/SSH closes; no expiration or
 	// persistent stale PID lock prevents recovering files after an interruption.
-	source := `umask 077
-exec 9>` + Quote(c.Writable+".limen-lock") + `
-flock -n 9 || { printf 'busy\n'; exit 75; }
-printf 'ready\n'
-cat >/dev/null`
 	if err = s.Start(source); err != nil {
 		s.Close()
 		return err
@@ -221,7 +229,7 @@ cat >/dev/null`
 	ready, err := bufio.NewReader(out).ReadString('\n')
 	if err != nil || ready != "ready\n" {
 		s.Close()
-		return errors.New("可写目录正在被其他 Limen 连接使用，请关闭该连接后重试")
+		return errors.New(message)
 	}
 	c.lease = s
 	c.leaseInput = in

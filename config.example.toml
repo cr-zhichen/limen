@@ -20,6 +20,7 @@ access_key_id = { env = "JUMPSERVER_ACCESS_KEY_ID" }
 access_key_secret = { env = "JUMPSERVER_ACCESS_KEY_SECRET" }
 
 [permissions]
+# 本节只控制命令审核；SFTP 文件传输和端口转发按 JumpServer 与账号权限运行。
 # 可选：read-only（只读，专用目录可写）、read-write（读写但禁止毁灭性操作）、
 # unrestricted（跳过审核，仍受远端账号权限限制）。可选一个或多个。
 # 默认 ["read-only"]；连接时只能申请此列表中的权限。

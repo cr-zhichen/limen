@@ -25,7 +25,7 @@ import (
 
 func New() *cobra.Command {
 	var file string
-	root := &cobra.Command{Use: "limen", Short: "通过 JumpServer 按权限执行 SSH 命令", SilenceUsage: true, SilenceErrors: true}
+	root := &cobra.Command{Use: "limen", Short: "通过 JumpServer 审核命令、传输文件和转发端口", SilenceUsage: true, SilenceErrors: true}
 	root.PersistentFlags().StringVar(&file, "config", config.DefaultPath(), "配置文件路径")
 	load := func() (*config.Config, error) { return config.Load(file) }
 	root.AddCommand(&cobra.Command{Use: "version", Short: "显示版本", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -108,6 +108,7 @@ func New() *cobra.Command {
 	host.Flags().StringVar(&trust, "trust", "", "已通过可信来源核实的 SHA256 指纹")
 	root.AddCommand(host)
 	root.AddCommand(connectCommand(load, false), connectCommand(load, true))
+	root.AddCommand(filesCommand(load), forwardCommand(load))
 	return root
 }
 func automatic(cmd *cobra.Command) func() {
@@ -141,17 +142,7 @@ func connectCommand(load func() (*config.Config, error), once bool) *cobra.Comma
 		defer cancel()
 		opening, stop := config.WithTimeout(ctx, c.Session.ConnectTimeout)
 		defer stop()
-		api := jumpserver.New(&c.JumpServer)
-		a, err := api.Asset(opening, asset)
-		if err != nil {
-			return err
-		}
-		token, err := api.Token(opening, a, account)
-		if err != nil {
-			return err
-		}
-		conn, err := remote.Connect(opening, &c.JumpServer, token)
-		token.Value = ""
+		conn, err := dialTarget(opening, c, asset, account)
 		if err != nil {
 			return err
 		}

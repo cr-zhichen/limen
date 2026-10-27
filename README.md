@@ -1,6 +1,6 @@
 # Limen
 
-Limen 是供 AI 助手和终端用户通过 JumpServer 执行远端命令的 CLI。它支持只读、读写和无限制三档权限，可以在一个持续 SSH 连接中逐条审核并执行命令。需要已有的 JumpServer Access Key，以及提供 Bash 和 flock（util-linux）的 Linux 服务器；只读和读写模式还需要配置 Jev 或普通 LLM。
+Limen 是供 AI 助手和终端用户通过 JumpServer 执行远端命令的 CLI。它支持只读、读写和无限制三档权限，可以在一个持续 SSH 连接中逐条审核并执行命令，同时支持文件传输和端口转发。需要已有的 JumpServer Access Key，以及提供 Bash 和 flock（util-linux）的 Linux 服务器；只读和读写模式还需要配置 Jev 或普通 LLM。
 
 ## 快速安装
 
@@ -57,6 +57,38 @@ limen connect --asset '<资产ID>' --account '<账号alias>' --permission read-o
 
 连接后的命令提交和正常关闭方式见 `limen skill`。单条命令也可以使用 `limen exec --help`。
 
+## 文件传输
+
+```sh
+limen files --asset '<资产ID>' --account '<账号alias>' ls /
+limen files --asset '<资产ID>' --account '<账号alias>' put ./report.csv /remote/report.csv
+limen files --asset '<资产ID>' --account '<账号alias>' get /remote/report.csv ./report.csv
+```
+
+目录传输添加 `--recursive`，目标路径表示目录本身。远端路径使用 `files ls` 返回的 SFTP 目录结构。
+
+## 端口转发
+
+本地端口转发：
+
+```sh
+limen forward --asset '<资产ID>' --account '<账号alias>' -L 8080:127.0.0.1:80
+```
+
+远端端口转发：
+
+```sh
+limen forward --asset '<资产ID>' --account '<账号alias>' -R 9000:127.0.0.1:3000
+```
+
+本地 SOCKS5 代理：
+
+```sh
+limen forward --asset '<资产ID>' --account '<账号alias>' -D 1080
+```
+
+默认只监听回环地址。`-L`、`-R`、`-D` 可以重复或组合使用；CLI 退出时关闭转发。
+
 ## AI skill
 
 ```sh
@@ -65,7 +97,9 @@ limen skill install
 
 默认安装到 `~/.agents/skills/limen`。其他 AI 工具使用 `limen skill install --dir <skills根目录>`。
 
-## 权限
+## 命令权限
+
+以下档位只用于命令审核。文件传输和端口转发在三档下均可使用，按 JumpServer 与远端账号原有权限运行，不审核传输内容。
 
 | 权限 | 允许范围 |
 | --- | --- |

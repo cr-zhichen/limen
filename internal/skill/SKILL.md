@@ -1,6 +1,6 @@
 ---
 name: limen
-description: 使用 Limen CLI 查询 JumpServer 授权资产与账号，申请只读、读写或无限制权限，保持 SSH 连接并逐条提交远端命令。用于用户要求通过 Limen 或 JumpServer 连接服务器的任务。
+description: 使用 Limen CLI 查询 JumpServer 授权资产与账号，申请只读、读写或无限制权限，保持 SSH 连接并逐条提交远端命令，以及传输文件和转发端口。用于用户要求通过 Limen 或 JumpServer 连接服务器的任务。
 ---
 
 # Limen
@@ -55,6 +55,30 @@ limen exec --asset '<资产ID>' --account '<账号alias>' --permission read-only
 ```
 
 命令完成后正常关闭并清理可写目录，不适合跨多次调用保留中间文件。
+
+## 文件上传下载
+
+使用用户指定的来源与目标路径；`put`、`get` 会覆盖同名普通文件。
+
+```sh
+limen files --asset '<资产ID>' --account '<账号alias>' ls /
+limen files --asset '<资产ID>' --account '<账号alias>' put ./report.csv /remote/report.csv
+limen files --asset '<资产ID>' --account '<账号alias>' get /remote/report.csv ./report.csv
+```
+
+传输目录添加 `--recursive`，目标路径表示目录本身。先用 `files ls` 确认 JumpServer 提供的 SFTP 目录结构，不假定它与 Shell 路径完全相同。
+
+## 端口转发
+
+```sh
+limen forward --asset '<资产ID>' --account '<账号alias>' -L 8080:127.0.0.1:80
+limen forward --asset '<资产ID>' --account '<账号alias>' -R 9000:127.0.0.1:3000
+limen forward --asset '<资产ID>' --account '<账号alias>' -D 1080
+```
+
+`-L` 把本地监听转到远端目标，`-R` 把远端监听转到本地目标，`-D` 提供本地 SOCKS5 TCP 代理。默认监听回环地址；可以重复或组合参数。保持该进程，任务完成后发送 Ctrl+C 关闭全部转发。
+
+文件传输和端口转发不经过模型审核，三档均可使用，仍须按用户指定的任务和目标操作；实际可用范围由 JumpServer 和账号权限决定。
 
 ## 更新与 skill 安装
 
