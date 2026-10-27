@@ -147,16 +147,16 @@ func connectCommand(load func() (*config.Config, error), once bool) *cobra.Comma
 			return err
 		}
 		defer conn.Close()
-		if err = conn.Prepare(opening, c.Permissions.WritableDir); err != nil {
+		if err = conn.Prepare(opening); err != nil {
 			return err
 		}
 		stop()
 
 		alive, disconnect := context.WithCancelCause(ctx)
 		defer disconnect(nil)
-		go func() { _ = conn.Wait(); disconnect(errors.New("SSH 已断开，可写目录内容已保留")) }()
+		go func() { _ = conn.Wait(); disconnect(errors.New("SSH 已断开，请重新连接")) }()
 		out := &session.Output{Encoder: json.NewEncoder(cmd.OutOrStdout())}
-		if err = out.Send(session.Event{Type: "connected", WritableDir: conn.Writable}); err != nil {
+		if err = out.Send(session.Event{Type: "connected"}); err != nil {
 			return err
 		}
 		runner := &session.Runner{Remote: conn, Reviewer: &review.Engine{Config: c}, Mode: mode, Settings: c.Session, Output: out}
@@ -166,16 +166,14 @@ func connectCommand(load func() (*config.Config, error), once bool) *cobra.Comma
 			if err != nil && !errors.As(err, &commandError) {
 				return err
 			}
-			if cleanupErr := runner.Finish(alive); cleanupErr != nil {
-				return cleanupErr
+			if finishErr := runner.Finish(); finishErr != nil {
+				return finishErr
 			}
 			return err
 		}
 		err = runner.Serve(alive, cmd.InOrStdin())
-		// SIGINT while idle is a normal close; during a command the transport may
-		// already be closed, so cleanup failure is reported instead of hidden.
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil && cmd.Context().Err() == nil {
-			return runner.Finish(context.Background())
+			return runner.Finish()
 		}
 
 		if alive.Err() != nil {

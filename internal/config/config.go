@@ -83,9 +83,8 @@ type JumpServer struct {
 	AccessKeySecret Secret `toml:"access_key_secret"`
 }
 type Permissions struct {
-	Allowed     []string `toml:"allowed"`
-	Default     string   `toml:"default"`
-	WritableDir string   `toml:"read_only_writable_dir"`
+	Allowed []string `toml:"allowed"`
+	Default string   `toml:"default"`
 }
 type Session struct {
 	ConnectTimeout int64 `toml:"connect_timeout"`
@@ -115,7 +114,7 @@ type Config struct {
 func Dir() string         { h, _ := os.UserHomeDir(); return filepath.Join(h, ".config", "limen") }
 func DefaultPath() string { return filepath.Join(Dir(), "config.toml") }
 func Defaults() *Config {
-	c := &Config{Permissions: Permissions{Allowed: []string{ReadOnly}, Default: ReadOnly, WritableDir: "~/.local/share/limen/tmp"}, Session: Session{15, 600, 300}}
+	c := &Config{Permissions: Permissions{Allowed: []string{ReadOnly}, Default: ReadOnly}, Session: Session{15, 600, 300}}
 	c.JumpServer.SSHPort = 2222
 	return c
 }
@@ -162,10 +161,6 @@ func (c *Config) Validate() error {
 		default:
 			return errors.New("权限只能是 read-only、read-write、unrestricted")
 		}
-	}
-	p := c.Permissions.WritableDir
-	if !(strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "/")) || strings.ContainsAny(p, "\x00\r\n") || p == "/" || p == "~/" {
-		return errors.New("可写目录必须是专用目录的绝对路径或 ~/ 开头的路径")
 	}
 	if !audited && c.Review.Mode == "" {
 		return nil

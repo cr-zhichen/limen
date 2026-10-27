@@ -21,11 +21,11 @@ import (
 )
 
 type Client struct {
-	SSH            *ssh.Client
-	Home, Writable string
-	lease          *ssh.Session
-	leaseInput     io.WriteCloser
-	leaseDone      chan error
+	SSH          *ssh.Client
+	Home         string
+	session      *ssh.Session
+	sessionInput io.WriteCloser
+	sessionDone  chan error
 }
 
 func Quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -99,7 +99,7 @@ func Probe(ctx context.Context, c *config.JumpServer, trust string) (string, err
 }
 
 // A deadline closes the transport; an explicit cancellation interrupts the
-// command channel so a healthy connection can still perform normal cleanup.
+// command channel so a healthy connection can still run subsequent commands.
 func (c *Client) Run(ctx context.Context, command string, stdout, stderr io.Writer) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return -1, err
@@ -146,7 +146,7 @@ func (c *Client) capture(ctx context.Context, command string) (string, error) {
 	}
 	return strings.TrimSpace(out.String()), nil
 }
-func (c *Client) Prepare(ctx context.Context, dir string) error {
+func (c *Client) Prepare(ctx context.Context) error {
 	home, err := c.capture(ctx, `printf '%s' "$HOME"`)
 	if err != nil {
 		return err
@@ -155,54 +155,12 @@ func (c *Client) Prepare(ctx context.Context, dir string) error {
 		return errors.New("远端账号没有有效的主目录")
 	}
 	c.Home = home
-	if strings.HasPrefix(dir, "~/") {
-		dir = path.Join(home, strings.TrimPrefix(dir, "~/"))
-	}
-	dir = path.Clean(dir)
-	if dir == "/" || dir == home {
-		return errors.New("可写目录不能是根目录或账号主目录，请配置专用目录")
-	}
-	canonical, err := c.capture(ctx, `set -eu
-command -v flock >/dev/null || { echo '远端缺少 flock，请安装 util-linux 后连接' >&2; exit 1; }
-mkdir -p -- `+Quote(dir)+`
-cd -- `+Quote(dir)+`
-pwd -P`)
-	if err != nil {
-		return err
-	}
-	if canonical == "/" || canonical == home || !path.IsAbs(canonical) {
-		return errors.New("可写目录解析到无效位置，请更换配置")
-	}
-	c.Writable = canonical
-	if err = c.acquire(ctx); err != nil {
-		return err
-	}
-	// The ownership marker stays outside files the user is allowed to delete.
-	script := `set -eu
-d=` + Quote(canonical) + `
-if [ ! -f "$d.limen-owned" ]; then
- if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  echo '可写目录已有其他内容，请配置一个空的专用目录' >&2; exit 1
- fi
- (umask 077; printf 'limen\n' > "$d.limen-owned")
-fi
-`
-	_, err = c.capture(ctx, script)
-	return err
+	return c.KeepOpen(ctx)
 }
 
-func (c *Client) acquire(ctx context.Context) error {
-	return c.hold(ctx, `umask 077
-exec 9>`+Quote(c.Writable+".limen-lock")+`
-flock -n 9 || { printf 'busy\n'; exit 75; }
-printf 'ready\n'
-cat >/dev/null`, "可写目录正在被其他 Limen 连接使用，请关闭该连接后重试")
-}
-
-// JumpServer initializes forwarding state from a live SSH session. No user
-// command or filesystem change is involved in keeping that channel open.
+// JumpServer routes commands and forwarding through a live asset session.
 func (c *Client) KeepOpen(ctx context.Context) error {
-	return c.hold(ctx, "printf 'ready\\n'; cat >/dev/null", "远端未能建立转发会话，请检查 JumpServer 的转发权限")
+	return c.hold(ctx, "printf 'ready\\n'; cat >/dev/null", "远端会话建立失败，请检查 JumpServer 连接权限")
 }
 func (c *Client) hold(ctx context.Context, source, message string) error {
 	stop := context.AfterFunc(ctx, func() { _ = c.SSH.Close() })
@@ -221,8 +179,6 @@ func (c *Client) hold(ctx context.Context, source, message string) error {
 		s.Close()
 		return err
 	}
-	// flock is held by the remote shell until stdin/SSH closes; no expiration or
-	// persistent stale PID lock prevents recovering files after an interruption.
 	if err = s.Start(source); err != nil {
 		s.Close()
 		return err
@@ -232,17 +188,17 @@ func (c *Client) hold(ctx context.Context, source, message string) error {
 		s.Close()
 		return errors.New(message)
 	}
-	c.lease = s
-	c.leaseInput = in
+	c.session = s
+	c.sessionInput = in
 	done := make(chan error, 1)
-	c.leaseDone = done
+	c.sessionDone = done
 	go func() { done <- s.Wait(); close(done) }()
 	return nil
 }
 
 // The asset's session may end while the gateway transport stays connected.
 func (c *Client) Wait() error {
-	if c.leaseDone == nil {
+	if c.sessionDone == nil {
 		return c.SSH.Wait()
 	}
 	transport := make(chan error, 1)
@@ -250,7 +206,7 @@ func (c *Client) Wait() error {
 	select {
 	case e := <-transport:
 		return e
-	case e := <-c.leaseDone:
+	case e := <-c.sessionDone:
 		return e
 	}
 }
@@ -268,43 +224,17 @@ func (c *Client) Command(command, cwd string) (string, error) {
 		return "", errors.New("cwd 必须是远端绝对路径或 ~/ 开头的路径")
 	}
 	// This exact source goes to both the reviewer and a fresh noninteractive Bash.
-	return "export LIMEN_WRITABLE_DIR=" + Quote(c.Writable) + "\nreadonly LIMEN_WRITABLE_DIR\ncd -- " + Quote(cwd) + " || exit\n" + command, nil
+	return "cd -- " + Quote(cwd) + " || exit\n" + command, nil
 }
 func (c *Client) Execute(ctx context.Context, source string, out, errout io.Writer) (int, error) {
 	return c.Run(ctx, "bash --noprofile --norc -c "+Quote(source), out, errout)
 }
-func (c *Client) CheckScratch(ctx context.Context) error {
-	// Existing links are a real path escape for an otherwise confined write.
-	source := `set -eu
-d=` + Quote(c.Writable) + `
-[ "$(cd -- "$d" && pwd -P)" = "$d" ]
-[ -f "$d.limen-owned" ]
-[ -z "$(find "$d" -type l -print -quit)" ]
-[ -z "$(find "$d" -type f -links +1 -print -quit)" ]`
-	_, err := c.capture(ctx, source)
-	if err != nil {
-		return errors.New("可写目录含有链接或已被替换，当前只读写入未执行；请检查目录")
-	}
-	return nil
-}
-func (c *Client) Cleanup(ctx context.Context) error {
-	if c.Writable == "" {
-		return nil
-	}
-	source := `set -eu
-d=` + Quote(c.Writable) + `
-[ "$(cd -- "$d" && pwd -P)" = "$d" ]
-[ -f "$d.limen-owned" ]
-find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`
-	_, err := c.capture(ctx, source)
-	return err
-}
 func (c *Client) Close() error {
-	if c.leaseInput != nil {
-		_ = c.leaseInput.Close()
+	if c.sessionInput != nil {
+		_ = c.sessionInput.Close()
 	}
-	if c.lease != nil {
-		_ = c.lease.Close()
+	if c.session != nil {
+		_ = c.session.Close()
 	}
 	return c.SSH.Close()
 }

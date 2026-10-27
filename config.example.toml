@@ -21,26 +21,20 @@ access_key_secret = { env = "JUMPSERVER_ACCESS_KEY_SECRET" }
 
 [permissions]
 # 本节只控制命令审核；SFTP 文件传输和端口转发按 JumpServer 与账号权限运行。
-# 可选：read-only（只读，专用目录可写）、read-write（读写但禁止毁灭性操作）、
+# 可选：read-only（只读）、read-write（读写但禁止毁灭性操作）、
 # unrestricted（跳过审核，仍受远端账号权限限制）。可选一个或多个。
 # 默认 ["read-only"]；连接时只能申请此列表中的权限。
 allowed = ["read-only"]
 # 默认 read-only，必须包含在 allowed 中。
 default = "read-only"
-# 默认 ~/.local/share/limen/tmp；~ 指远端账号主目录，也可填写绝对路径。
-# 只读时仅此目录及子目录可创建、修改、删除文件，不改变当前执行目录。
-# 使用空的专用目录。正常退出清空内容；意外断开保留，下次连接直接使用。
-# 不按时间自动删除，不自动把其他目录的写入重定向到这里。
-read_only_writable_dir = "~/.local/share/limen/tmp"
 
 [session]
 # 所有超时均为非负整数秒；0 取消对应超时，不影响 JumpServer 自身限制。
 # 建立连接超时，默认 15。
 connect_timeout = 15
 # 无正在处理的命令且无新请求时的空闲超时，默认 600。
-# 到期退出并保留可写目录内容。
 idle_timeout = 600
-# 单条命令处理超时（审核及执行合计），默认 300；超时保留目录内容。
+# 单条命令处理超时（审核及执行合计），默认 300。
 command_timeout = 300
 
 [review]

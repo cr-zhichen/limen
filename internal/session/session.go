@@ -20,8 +20,6 @@ import (
 type Remote interface {
 	Command(string, string) (string, error)
 	Execute(context.Context, string, io.Writer, io.Writer) (int, error)
-	CheckScratch(context.Context) error
-	Cleanup(context.Context) error
 }
 type Reviewer interface {
 	Check(context.Context, string, string) (review.Decision, error)
@@ -33,14 +31,13 @@ type Request struct {
 	Cwd     string `json:"cwd,omitempty"`
 }
 type Event struct {
-	Type        string           `json:"type"`
-	ID          string           `json:"id,omitempty"`
-	Data        string           `json:"data,omitempty"`
-	Encoding    string           `json:"encoding,omitempty"`
-	ExitCode    *int             `json:"exit_code,omitempty"`
-	Error       string           `json:"error,omitempty"`
-	Decision    *review.Decision `json:"review,omitempty"`
-	WritableDir string           `json:"writable_dir,omitempty"`
+	Type     string           `json:"type"`
+	ID       string           `json:"id,omitempty"`
+	Data     string           `json:"data,omitempty"`
+	Encoding string           `json:"encoding,omitempty"`
+	ExitCode *int             `json:"exit_code,omitempty"`
+	Error    string           `json:"error,omitempty"`
+	Decision *review.Decision `json:"review,omitempty"`
 }
 type Output struct {
 	mu      sync.Mutex
@@ -119,11 +116,6 @@ func (r *Runner) Exec(ctx context.Context, req Request) error {
 	if !decision.Allowed {
 		return r.reject(req.ID, decision.Reason, &decision)
 	}
-	if r.Mode == config.ReadOnly && decision.Facts != nil && decision.Facts.FileScope == "scratch" {
-		if err = r.Remote.CheckScratch(ctx); err != nil {
-			return r.reject(req.ID, err.Error(), nil)
-		}
-	}
 	stdout := &stream{o: r.Output, id: req.ID, kind: "stdout"}
 	stderr := &stream{o: r.Output, id: req.ID, kind: "stderr"}
 	code, err := r.Remote.Execute(ctx, source, stdout, stderr)
@@ -148,13 +140,7 @@ func (r *Runner) Exec(ctx context.Context, req Request) error {
 	}
 	return nil
 }
-func (r *Runner) Finish(ctx context.Context) error {
-	cleanup, cancel := config.WithTimeout(ctx, r.Settings.ConnectTimeout)
-	defer cancel()
-	if err := r.Remote.Cleanup(cleanup); err != nil {
-		_ = r.Output.Send(Event{Type: "closed", Error: "可写目录未完成清理，请下次连接后检查"})
-		return err
-	}
+func (r *Runner) Finish() error {
 	return r.Output.Send(Event{Type: "closed"})
 }
 func (r *Runner) Serve(ctx context.Context, input io.Reader) error {
@@ -199,7 +185,7 @@ func (r *Runner) Serve(ctx context.Context, input io.Reader) error {
 			}
 			return ctx.Err()
 		case <-timeout:
-			return errors.New("连接空闲超时，已保留可写目录内容")
+			return errors.New("连接空闲超时，请重新连接")
 		case item = <-lines:
 			if timer != nil {
 				timer.Stop()
@@ -207,7 +193,7 @@ func (r *Runner) Serve(ctx context.Context, input io.Reader) error {
 		}
 		if item.err != nil {
 			if errors.Is(item.err, io.EOF) {
-				return errors.New("输入已断开，已保留可写目录内容；正常退出请发送 close 请求")
+				return errors.New("输入已断开；正常退出请发送 close 请求")
 			}
 			return item.err
 		}
@@ -227,7 +213,7 @@ func (r *Runner) Serve(ctx context.Context, input io.Reader) error {
 		}
 		switch req.Op {
 		case "close":
-			return r.Finish(ctx)
+			return r.Finish()
 		case "exec":
 			if err = r.Exec(ctx, req); err != nil {
 				var commandError *CommandError

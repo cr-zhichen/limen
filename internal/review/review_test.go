@@ -17,15 +17,13 @@ func TestPermissionBoundaries(t *testing.T) {
 		facts  Facts
 		ro, rw bool
 	}{
-		{"read credentials", Facts{"none", "no", "no", "simple"}, true, true},
-		{"scratch report", Facts{"scratch", "no", "no", "simple"}, true, true},
-		{"ordinary delete", Facts{"other", "no", "no", "simple"}, false, true},
-		{"service restart", Facts{"none", "yes", "no", "simple"}, false, true},
-		{"disk wipe", Facts{"other", "no", "yes", "simple"}, false, false},
+		{"read credentials", Facts{"no", "no", "no", "simple"}, true, true},
+		{"ordinary delete", Facts{"yes", "no", "no", "simple"}, false, true},
+		{"service restart", Facts{"no", "yes", "no", "simple"}, false, true},
+		{"disk wipe", Facts{"yes", "no", "yes", "simple"}, false, false},
 		{"script without meaningful cues", Facts{"unknown", "unknown", "no", "simple"}, true, true},
 		{"unknown executable effects", Facts{"unknown", "unknown", "unknown", "complex"}, true, true},
-		{"unknown path", Facts{"unknown", "no", "unknown", "complex"}, true, true},
-		{"known outside write with unknown state", Facts{"other", "unknown", "unknown", "complex"}, false, true},
+		{"known file change with unknown state", Facts{"yes", "unknown", "unknown", "complex"}, false, true},
 		{"known state change with unknown files", Facts{"unknown", "yes", "unknown", "complex"}, false, true},
 		{"known destruction with unknown other effects", Facts{"unknown", "unknown", "yes", "complex"}, false, false},
 	}
@@ -53,9 +51,9 @@ func jevResponse(f Facts, p float64) any {
 	return map[string]any{"answers": a}
 }
 func TestReviewConfidenceAndHybridRecheck(t *testing.T) {
-	read := Facts{"none", "no", "no", "simple"}
-	write := Facts{"other", "no", "no", "simple"}
-	wipe := Facts{"other", "no", "yes", "simple"}
+	read := Facts{"no", "no", "no", "simple"}
+	write := Facts{"yes", "no", "no", "simple"}
+	wipe := Facts{"yes", "no", "yes", "simple"}
 	script := Facts{"unknown", "unknown", "unknown", "complex"}
 	for _, tt := range []struct {
 		name, mode   string
@@ -120,7 +118,7 @@ func TestUnrestrictedDoesNotResolveModelKeys(t *testing.T) {
 	}
 }
 func TestMalformedReviewFailsClosed(t *testing.T) {
-	for _, response := range []string{`{}`, `{"answers":{"file_scope":{"choice":"none","probabilities":{"none":1}}}}`} {
+	for _, response := range []string{`{}`, `{"answers":{"file_change":{"choice":"no","probabilities":{"no":1}}}}`} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, response) }))
 		c := config.Defaults()
 		c.Review.Mode = "jev"

@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,9 +24,6 @@ func testSSH(t *testing.T) (string, ssh.PublicKey) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture runs a POSIX remote shell")
-	}
-	if _, e := exec.LookPath("flock"); e != nil {
-		t.Skip("Linux SSH fixture requires flock; exercised by Linux CI")
 	}
 	_, private, _ := ed25519.GenerateKey(rand.Reader)
 	signer, _ := ssh.NewSignerFromKey(private)
@@ -126,25 +122,20 @@ func testSSH(t *testing.T) (string, ssh.PublicKey) {
 type cancelOnOutput struct{ cancel context.CancelFunc }
 
 func (w cancelOnOutput) Write(b []byte) (int, error) { w.cancel(); return len(b), nil }
-func TestInterruptLeavesConnectionAvailableForCleanup(t *testing.T) {
+func TestInterruptLeavesConnectionAvailableForNextCommand(t *testing.T) {
 	addr, key := testSSH(t)
 	c := fixtureClient(t, addr, key)
-	dir := filepath.Join(t.TempDir(), "scratch")
-	if e := c.Prepare(context.Background(), dir); e != nil {
+	if e := c.Prepare(context.Background()); e != nil {
 		t.Fatal(e)
 	}
-	os.WriteFile(filepath.Join(dir, "result"), []byte("data"), 0600)
 	source, _ := c.Command("printf started; exec sleep 30", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if _, e := c.Execute(ctx, source, cancelOnOutput{cancel}, io.Discard); !errors.Is(e, context.Canceled) {
 		t.Fatal("interrupt did not stop command", e)
 	}
-	if e := c.Cleanup(context.Background()); e != nil {
-		t.Fatal("connection unavailable for normal cleanup", e)
-	}
-	if _, e := os.Stat(filepath.Join(dir, "result")); !os.IsNotExist(e) {
-		t.Fatal("normal interruption did not clean files")
+	if output, e := c.capture(context.Background(), "printf available"); e != nil || output != "available" {
+		t.Fatal("connection unavailable for next command", output, e)
 	}
 }
 
@@ -179,92 +170,51 @@ func fixtureClient(t *testing.T, addr string, key ssh.PublicKey) *Client {
 	t.Cleanup(func() { c.Close() })
 	return c
 }
-func TestPersistentSSHRetainsOnDisconnectAndCleansOnClose(t *testing.T) {
+func TestSameAccountConnectionsRunIndependently(t *testing.T) {
 	addr, key := testSSH(t)
-	c := fixtureClient(t, addr, key)
-	dir := filepath.Join(t.TempDir(), "scratch")
-	ctx := context.Background()
-	if e := c.Prepare(ctx, dir); e != nil {
-		t.Fatal(e)
+	first := fixtureClient(t, addr, key)
+	second := fixtureClient(t, addr, key)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, c := range []*Client{first, second} {
+		if e := c.Prepare(ctx); e != nil {
+			t.Fatal(e)
+		}
 	}
-	source, e := c.Command(`printf '%s' data > "$LIMEN_WRITABLE_DIR/result"`, "")
+	output, writer := io.Pipe()
+	defer output.Close()
+	defer writer.Close()
+	running, stop := context.WithCancel(ctx)
+	defer stop()
+	finished := make(chan error, 1)
+	source, e := first.Command("printf started; exec sleep 30", "")
 	if e != nil {
 		t.Fatal(e)
 	}
-	if code, e := c.Execute(ctx, source, io.Discard, io.Discard); e != nil || code != 0 {
-		t.Fatal(code, e)
+	go func() {
+		_, e := first.Execute(running, source, writer, io.Discard)
+		writer.CloseWithError(e)
+		finished <- e
+	}()
+	started := make([]byte, len("started"))
+	if _, e = io.ReadFull(output, started); e != nil || string(started) != "started" {
+		t.Fatal("first command did not start", e)
 	}
-	// Clearing every writable file must not remove Limen's ownership metadata.
-	source, _ = c.Command(`find "$LIMEN_WRITABLE_DIR" -mindepth 1 -delete; printf '%s' data > "$LIMEN_WRITABLE_DIR/result"`, "")
-	if code, e := c.Execute(ctx, source, io.Discard, io.Discard); e != nil || code != 0 {
-		t.Fatal(code, e)
-	}
-	c.Close()
-	if b, e := os.ReadFile(filepath.Join(dir, "result")); e != nil || string(b) != "data" {
-		t.Fatal("disconnect removed result", e)
-	}
-	c = fixtureClient(t, addr, key)
-	if e = c.Prepare(ctx, dir); e != nil {
+	source, e = second.Command("printf parallel", "")
+	if e != nil {
 		t.Fatal(e)
 	}
-	source, _ = c.Command(`printf '%s' "$LIMEN_WRITABLE_DIR"`, "")
-	var output bytes.Buffer
-	if _, e = c.Execute(ctx, source, &output, io.Discard); e != nil || strings.TrimSpace(output.String()) != c.Writable {
-		t.Fatal("reconnect did not reuse path", e)
+	var result bytes.Buffer
+	if code, e := second.Execute(ctx, source, &result, io.Discard); e != nil || code != 0 || result.String() != "parallel" {
+		t.Fatal("second connection could not execute concurrently", result.String(), code, e)
 	}
-	if e = c.Cleanup(ctx); e != nil {
-		t.Fatal(e)
+	stop()
+	if e = <-finished; !errors.Is(e, context.Canceled) {
+		t.Fatal("first command did not stop", e)
 	}
-	if _, e = os.Stat(filepath.Join(dir, "result")); !os.IsNotExist(e) {
-		t.Fatal("normal close did not clean")
-	}
-}
-
-func TestConcurrentConnectionsCannotCleanEachOthersFiles(t *testing.T) {
-	addr, key := testSSH(t)
-	first := fixtureClient(t, addr, key)
-	dir := filepath.Join(t.TempDir(), "scratch")
-	ctx := context.Background()
-	if e := first.Prepare(ctx, dir); e != nil {
-		t.Fatal(e)
-	}
-	os.WriteFile(filepath.Join(dir, "data"), []byte("keep"), 0600)
-	second := fixtureClient(t, addr, key)
-	if e := second.Prepare(ctx, dir); e == nil {
-		t.Fatal("second session shared active writable directory")
-	}
-	second.Close()
-	if b, _ := os.ReadFile(filepath.Join(dir, "data")); string(b) != "keep" {
-		t.Fatal("second connection deleted active data")
-	}
-	if e := first.Cleanup(ctx); e != nil {
-		t.Fatal(e)
-	}
-}
-func TestScratchLinksAndExistingData(t *testing.T) {
-	addr, key := testSSH(t)
-	c := fixtureClient(t, addr, key)
-	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), "scratch")
-	if e := c.Prepare(ctx, dir); e != nil {
-		t.Fatal(e)
-	}
-	outside := filepath.Join(t.TempDir(), "outside")
-	os.WriteFile(outside, []byte("keep"), 0600)
-	os.Symlink(outside, filepath.Join(dir, "link"))
-	if c.CheckScratch(ctx) == nil {
-		t.Fatal("link allowed")
-	}
-	if e := c.Cleanup(ctx); e != nil {
-		t.Fatal(e)
-	}
-	if b, _ := os.ReadFile(outside); string(b) != "keep" {
-		t.Fatal("cleanup followed symlink")
-	}
-	unowned := t.TempDir()
-	os.WriteFile(filepath.Join(unowned, "original"), []byte("keep"), 0600)
-	if c.Prepare(ctx, unowned) == nil {
-		t.Fatal("unowned directory accepted")
+	first.Close()
+	if result, e := second.capture(ctx, "printf available"); e != nil || result != "available" {
+		t.Fatal("closing first connection affected second", result, e)
 	}
 }
 func TestHostKeyMismatchAndCancellation(t *testing.T) {

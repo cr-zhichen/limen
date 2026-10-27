@@ -17,8 +17,6 @@ import (
 
 type fakeRemote struct {
 	executed []string
-	cleaned  bool
-	checkErr error
 }
 
 func (f *fakeRemote) Command(command, cwd string) (string, error) { return command, nil }
@@ -27,9 +25,6 @@ func (f *fakeRemote) Execute(_ context.Context, s string, out, errout io.Writer)
 	fmt.Fprint(out, "answer")
 	return 0, nil
 }
-func (f *fakeRemote) CheckScratch(context.Context) error { return f.checkErr }
-func (f *fakeRemote) Cleanup(context.Context) error      { f.cleaned = true; return nil }
-func (f *fakeRemote) Close() error                       { return nil }
 
 type testReviewer struct{}
 
@@ -40,11 +35,7 @@ func (testReviewer) Check(_ context.Context, mode, command string) (review.Decis
 	if command == "error" {
 		return review.Decision{}, errors.New("review unavailable")
 	}
-	scope := "none"
-	if command == "write" {
-		scope = "scratch"
-	}
-	return review.Decision{Allowed: true, Facts: &review.Facts{FileScope: scope}}, nil
+	return review.Decision{Allowed: true}, nil
 }
 func TestSessionLifetimeAndGate(t *testing.T) {
 	for _, normal := range []bool{false, true} {
@@ -57,14 +48,15 @@ func TestSessionLifetimeAndGate(t *testing.T) {
 				input += "{\"op\":\"close\"}\n"
 			}
 			e := r.Serve(context.Background(), strings.NewReader(input))
-			if normal != (e == nil) || f.cleaned != normal {
-				t.Fatal("wrong lifecycle", e, f.cleaned)
+			if normal != (e == nil) {
+				t.Fatal("wrong lifecycle", e)
 			}
 			if len(f.executed) != 1 || f.executed[0] != "read" {
 				t.Fatal("unreviewed execution", f.executed)
 			}
 			dec := json.NewDecoder(&output)
 			success := false
+			closed := false
 			for {
 				var event Event
 				if e := dec.Decode(&event); e == io.EOF {
@@ -75,23 +67,20 @@ func TestSessionLifetimeAndGate(t *testing.T) {
 				if event.ID == "ok" && event.ExitCode != nil && *event.ExitCode == 0 {
 					success = true
 				}
+				if event.Type == "closed" {
+					closed = true
+				}
 			}
 			if !success {
 				t.Fatal("no completed result")
 			}
+			if closed != normal {
+				t.Fatal("wrong close event", closed)
+			}
 		})
 	}
 }
-func TestUnsafeScratchNeverExecuted(t *testing.T) {
-	f := &fakeRemote{checkErr: errors.New("outside link")}
-	var out bytes.Buffer
-	r := Runner{Remote: f, Reviewer: testReviewer{}, Mode: config.ReadOnly, Output: &Output{Encoder: json.NewEncoder(&out)}}
-	e := r.Exec(context.Background(), Request{Command: "write"})
-	if e == nil || len(f.executed) != 0 {
-		t.Fatal("escaped scratch write executed")
-	}
-}
-func TestCancelledSessionPreservesFiles(t *testing.T) {
+func TestCancelledSessionStops(t *testing.T) {
 	f := &fakeRemote{}
 	r := Runner{Remote: f, Reviewer: testReviewer{}, Output: &Output{Encoder: json.NewEncoder(io.Discard)}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,8 +88,8 @@ func TestCancelledSessionPreservesFiles(t *testing.T) {
 	input, writer := io.Pipe()
 	defer input.Close()
 	defer writer.Close()
-	if !errors.Is(r.Serve(ctx, input), context.Canceled) || f.cleaned {
-		t.Fatal("cancel cleaned data")
+	if !errors.Is(r.Serve(ctx, input), context.Canceled) {
+		t.Fatal("session did not stop")
 	}
 }
 
