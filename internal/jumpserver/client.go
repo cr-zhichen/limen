@@ -19,6 +19,7 @@ import (
 )
 
 const rootOrg = "00000000-0000-0000-0000-000000000002"
+const assetsPath = "/api/v1/perms/users/self/assets/"
 
 type Client struct {
 	Config *config.JumpServer
@@ -35,7 +36,34 @@ type Asset struct {
 	Name     string    `json:"name"`
 	Address  string    `json:"address"`
 	OrgID    string    `json:"org_id"`
+	OrgName  string    `json:"org_name"`
+	Nodes    []Node    `json:"nodes"`
+	Platform *Platform `json:"platform"`
+	Category Choice    `json:"category"`
+	Type     Choice    `json:"type"`
+	IsActive bool      `json:"is_active"`
+	Labels   []Label   `json:"labels"`
+	Comment  string    `json:"comment"`
 	Accounts []Account `json:"permed_accounts,omitempty"`
+}
+type Node struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	FullValue string `json:"full_value,omitempty"`
+}
+type Platform struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+type Choice struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+type Label struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Color string `json:"color"`
 }
 type Token struct {
 	ID    string `json:"id"`
@@ -95,13 +123,34 @@ func (c *Client) request(ctx context.Context, method, path, org string, payload,
 	return nil
 }
 func (c *Client) Assets(ctx context.Context) ([]Asset, error) {
-	all := []Asset{}
+	assets, e := list[Asset](ctx, c, assetsPath)
+	if e != nil || len(assets) == 0 {
+		return assets, e
+	}
+	nodes, e := list[Node](ctx, c, "/api/v1/perms/users/self/nodes/")
+	if e != nil {
+		return nil, e
+	}
+	paths := make(map[string]string, len(nodes))
+	for _, node := range nodes {
+		paths[node.ID] = node.FullValue
+	}
+	for i := range assets {
+		for j := range assets[i].Nodes {
+			node := &assets[i].Nodes[j]
+			node.FullValue = paths[node.ID]
+		}
+	}
+	return assets, nil
+}
+func list[T any](ctx context.Context, c *Client, path string) ([]T, error) {
+	all := []T{}
 	for offset := 0; ; {
 		var page struct {
-			Count   int     `json:"count"`
-			Results []Asset `json:"results"`
+			Count   int `json:"count"`
+			Results []T `json:"results"`
 		}
-		if e := c.request(ctx, "GET", "/api/v1/perms/users/self/assets/?limit=100&offset="+strconv.Itoa(offset), "", nil, &page); e != nil {
+		if e := c.request(ctx, "GET", path+"?limit=100&offset="+strconv.Itoa(offset), "", nil, &page); e != nil {
 			return nil, e
 		}
 		all = append(all, page.Results...)
@@ -112,14 +161,14 @@ func (c *Client) Assets(ctx context.Context) ([]Asset, error) {
 	}
 }
 func (c *Client) Asset(ctx context.Context, id string) (Asset, error) {
-	list, e := c.Assets(ctx)
+	assets, e := list[Asset](ctx, c, assetsPath)
 	if e != nil {
 		return Asset{}, e
 	}
-	for _, a := range list {
+	for _, a := range assets {
 		if a.ID == id {
 			var detail Asset
-			e = c.request(ctx, "GET", "/api/v1/perms/users/self/assets/"+url.PathEscape(id)+"/", a.OrgID, nil, &detail)
+			e = c.request(ctx, "GET", assetsPath+url.PathEscape(id)+"/", a.OrgID, nil, &detail)
 			if detail.OrgID == "" {
 				detail.OrgID = a.OrgID
 			}

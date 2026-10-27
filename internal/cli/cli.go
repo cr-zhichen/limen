@@ -60,7 +60,7 @@ func New() *cobra.Command {
 	}})
 	root.AddCommand(cfg, skillCommand(), updateCommand())
 	for _, name := range []string{"assets", "accounts"} {
-		c := &cobra.Command{Use: name, Short: "列出授权资产", Args: cobra.NoArgs}
+		c := &cobra.Command{Use: name, Short: "列出授权资产及分组、平台、标签和备注", Args: cobra.NoArgs}
 		if name == "accounts" {
 			c.Use = "accounts <资产ID>"
 			c.Short = "列出资产的可连接账号"
