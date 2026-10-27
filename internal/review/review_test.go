@@ -17,17 +17,21 @@ func TestPermissionBoundaries(t *testing.T) {
 		facts  Facts
 		ro, rw bool
 	}{
-		{"read credentials", Facts{"none", "no", "no", "no", "simple"}, true, true},
-		{"scratch report", Facts{"scratch", "no", "no", "no", "simple"}, true, true},
-		{"ordinary delete", Facts{"other", "no", "no", "no", "simple"}, false, true},
-		{"service restart", Facts{"none", "yes", "no", "no", "simple"}, false, true},
-		{"disk wipe", Facts{"other", "no", "yes", "no", "simple"}, false, false},
-		{"missing script", Facts{"unknown", "unknown", "unknown", "yes", "complex"}, false, false},
-		{"unknown path", Facts{"unknown", "no", "unknown", "no", "complex"}, false, false},
+		{"read credentials", Facts{"none", "no", "no", "simple"}, true, true},
+		{"scratch report", Facts{"scratch", "no", "no", "simple"}, true, true},
+		{"ordinary delete", Facts{"other", "no", "no", "simple"}, false, true},
+		{"service restart", Facts{"none", "yes", "no", "simple"}, false, true},
+		{"disk wipe", Facts{"other", "no", "yes", "simple"}, false, false},
+		{"script without meaningful cues", Facts{"unknown", "unknown", "no", "simple"}, true, true},
+		{"unknown executable effects", Facts{"unknown", "unknown", "unknown", "complex"}, true, true},
+		{"unknown path", Facts{"unknown", "no", "unknown", "complex"}, true, true},
+		{"known outside write with unknown state", Facts{"other", "unknown", "unknown", "complex"}, false, true},
+		{"known state change with unknown files", Facts{"unknown", "yes", "unknown", "complex"}, false, true},
+		{"known destruction with unknown other effects", Facts{"unknown", "unknown", "yes", "complex"}, false, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if Authorize(config.ReadOnly, tt.facts).Allowed != tt.ro || Authorize(config.ReadWrite, tt.facts).Allowed != tt.rw {
+			if Authorize(config.ReadOnly, tt.facts).Allowed != tt.ro || Authorize(config.ReadWrite, tt.facts).Allowed != tt.rw || !Authorize(config.Unrestricted, tt.facts).Allowed {
 				t.Fatal("wrong authorization")
 			}
 		})
@@ -48,16 +52,29 @@ func jevResponse(f Facts, p float64) any {
 	}
 	return map[string]any{"answers": a}
 }
-func TestHybridRejectsWithoutEscalatingAndRechecksUncertainAllow(t *testing.T) {
+func TestReviewConfidenceAndHybridRecheck(t *testing.T) {
+	read := Facts{"none", "no", "no", "simple"}
+	write := Facts{"other", "no", "no", "simple"}
+	wipe := Facts{"other", "no", "yes", "simple"}
+	script := Facts{"unknown", "unknown", "unknown", "complex"}
 	for _, tt := range []struct {
-		name           string
-		facts          Facts
-		p              float64
-		wantLLM, allow bool
+		name, mode   string
+		facts        Facts
+		p            float64
+		llmFacts     Facts
+		wantReviewer string
+		allow        bool
 	}{
-		{"reject", Facts{"other", "no", "yes", "no", "simple"}, .6, false, false},
-		{"clear", Facts{"none", "no", "no", "no", "simple"}, .99, false, true},
-		{"uncertain", Facts{"scratch", "no", "no", "no", "simple"}, .7, true, true},
+		{"clear reject", "hybrid", wipe, .99, read, "jev", false},
+		{"clear allow", "hybrid", read, .99, wipe, "jev", true},
+		{"uncertain allow confirmed", "hybrid", read, .7, read, "llm", true},
+		{"uncertain allow rejected", "hybrid", read, .7, wipe, "llm", false},
+		{"uncertain write rejection corrected", "hybrid", write, .7, read, "llm", true},
+		{"uncertain reject confirmed", "hybrid", wipe, .7, wipe, "llm", false},
+		{"complex script remains unknown", "hybrid", script, .99, script, "llm", true},
+		{"jev uncertain allow accepted", "jev", read, .7, read, "jev", true},
+		{"jev unknown script accepted", "jev", script, .7, read, "jev", true},
+		{"jev uncertain reject retained", "jev", wipe, .7, read, "jev", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			llm := false
@@ -73,18 +90,24 @@ func TestHybridRejectsWithoutEscalatingAndRechecksUncertainAllow(t *testing.T) {
 					return
 				}
 				llm = true
-				fmt.Fprint(w, `{"choices":[{"finish_reason":"stop","message":{"content":"{\"file_scope\":\"scratch\",\"state_change\":\"no\",\"destructive\":\"no\",\"opaque\":\"no\",\"complexity\":\"complex\"}"}}]}`)
+				content, _ := json.Marshal(tt.llmFacts)
+				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
+					"finish_reason": "stop", "message": map[string]string{"content": string(content)},
+				}}})
 			}))
 			defer srv.Close()
 			c := config.Defaults()
-			c.Review.Mode = "hybrid"
+			c.Review.Mode = tt.mode
 			c.Models.Jev.Endpoint = srv.URL + "/jev"
 			c.Models.Jev.APIKey.Value = "key"
 			c.Models.LLM.Endpoint = srv.URL + "/llm"
 			c.Models.LLM.APIKey.Value = "key"
 			d, e := (&Engine{Config: c}).Check(context.Background(), config.ReadOnly, "actual command")
-			if e != nil || d.Allowed != tt.allow || llm != tt.wantLLM {
+			if e != nil || d.Allowed != tt.allow || d.Reviewer != tt.wantReviewer || llm != (tt.wantReviewer == "llm") {
 				t.Fatal(d, e, llm)
+			}
+			if llm && (d.Facts == nil || *d.Facts != tt.llmFacts) {
+				t.Fatal("final decision did not use LLM classification", d)
 			}
 		})
 	}
